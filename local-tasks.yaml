@@ -1,0 +1,93 @@
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: git-clone
+spec:
+  workspaces:
+    - name: output
+  params:
+    - name: url
+      type: string
+    - name: revision
+      type: string
+      default: main
+  steps:
+    - name: clone
+      image: alpine/git:v2.26.2
+      script: |
+        git clone $(params.url) $(workspaces.output.path)
+        cd $(workspaces.output.path)
+        git checkout $(params.revision)
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: flake8
+spec:
+  workspaces:
+    - name: source
+  params:
+    - name: image
+      type: string
+      default: "python:3.9-slim"
+    - name: args
+      type: string
+      default: "--count --statistics"
+  steps:
+    - name: lint
+      image: $(params.image)
+      workingDir: $(workspaces.source.path)
+      script: |
+        # Point to the new directory name
+        if [ -d "practice-devops" ]; then
+          cd practice-devops
+        fi
+        pip install flake8
+        flake8 $(params.args)
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: buildah
+spec:
+  workspaces:
+    - name: source
+  params:
+    - name: IMAGE
+      type: string
+  steps:
+    - name: build-and-push
+      image: gcr.io/kaniko-project/executor:v1.9.1-debug
+      command:
+        - /busybox/sh
+      args:
+        - -c
+        - |
+          # Dynamically search using the new folder scope: practice-devops
+          if [ -f "$(workspaces.source.path)/Dockerfile" ]; then
+            CTX_DIR="$(workspaces.source.path)"
+            DF_FILE="$(workspaces.source.path)/Dockerfile"
+          elif [ -f "$(workspaces.source.path)/practice-devops/Dockerfile" ]; then
+            CTX_DIR="$(workspaces.source.path)/practice-devops"
+            DF_FILE="$(workspaces.source.path)/practice-devops/Dockerfile"
+          elif [ -f "$(workspaces.source.path)/practice-devops/service/Dockerfile" ]; then
+            CTX_DIR="$(workspaces.source.path)/practice-devops"
+            DF_FILE="$(workspaces.source.path)/practice-devops/service/Dockerfile"
+          else
+            echo "Searching workspace for missing file layout..."
+            find $(workspaces.source.path) -name "Dockerfile"
+            exit 1
+          fi
+
+          TARGET_IMG=$(echo "$(params.IMAGE)" | sed 's/k3d-registry.localhost:5001/k3d-dev-cluster-registry:5000/g')
+
+          echo "Found context: $CTX_DIR"
+          echo "Found file: $DF_FILE"
+          echo "Compiling and Pushing to: $TARGET_IMG"
+
+          /kaniko/executor \
+            --context=$CTX_DIR \
+            --dockerfile=$DF_FILE \
+            --destination=$TARGET_IMG \
+            --insecure \
+            --skip-tls-verify
